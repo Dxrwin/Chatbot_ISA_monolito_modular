@@ -319,3 +319,20 @@ async def get_payable(
             f"Error de conexión al obtener payable {payable_id}",
             response_text=str(e)
         )
+
+
+async def get_payment_status(access_token: str, org_id: str, client_id: str, credit_id: str, order_id: str) -> dict:
+    """Consulta el estado de una orden de pago específica."""
+    headers = _build_headers(access_token, org_id, client_id)
+    # Endpoint específico reconstruido
+    url = f"https://api.kuenta.co/v1/payable/{credit_id}/installment/0/order/list/{order_id}"
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            _handle_http_error(e)
+        except httpx.RequestError as e:
+            raise KuentaConnectionError(f"Error al consultar estado de pago", response_text=str(e))

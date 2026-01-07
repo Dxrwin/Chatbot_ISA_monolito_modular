@@ -30,12 +30,8 @@ cuotas_cache: Dict[str, Dict[str, Any]] = {}
 
 async def crear_payable(client_id: str, payload: PayableRequest):
     """
-    Endpoint para crear un nuevo payable:
-    1. Recibe el ID del cliente como parÃƒÂ¡metro
-    2. Transforma los campos principal y initialFee de str a int
-    3. Extrae el token de autorizacion del payload
-    4. Realiza la peticion POST al endpoint de payable
-    
+    Crea un payable usando el cliente modular de Kuenta.
+    Maneja creación + simulación en un flujo lineal.
     """
     method_name = "create_payable"
     response_credit_id = None
@@ -218,68 +214,56 @@ async def crear_payable(client_id: str, payload: PayableRequest):
 
 async def obtener_estado(debtor_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Consulta el estado de un pago con creditid, installmentid y orderid.
+    Consulta estado usando el cliente modular.
+    Sigue intentando hasta 3 veces si el estado es 'pending',
+    pero usa la lógica limpia del cliente para la petición HTTP.
     """
     method_name = "obtener_estado"
     creditid = payload.get("creditid")
-    installmentid = payload.get("installmentid")
     orderid = payload.get("orderid")
-    debtor_id_notify_error = f"debtor_id_cliente = {debtor_id} y creditid = {creditid}"
+    
+    if not creditid or not orderid:
+        raise HTTPException(status_code=400, detail="Faltan creditid u orderid")
 
+    async with httpx.AsyncClient() as auth_client:
+        token = await obtener_token(auth_client)
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Error de autenticación interna")
+
+    intentos = 3
+    intervalo = 10
+    
     try:
-        logger.info(f"Parametros recibidos: creditid={creditid}, installmentid={installmentid}, orderid={orderid}")
+        # Bucle de lógica de negocio (polling), no de conexión HTTP
+        for i in range(intentos):
+            try:
+                data = await get_payment_status(
+                    access_token=token,
+                    org_id=ORG_ID,
+                    client_id=debtor_id,
+                    credit_id=creditid,
+                    order_id=orderid
+                )
+                
+                status = data.get("status")
+                logger.info(f"Intento {i+1}: status = {status}")
+                
+                if status != "pending":
+                    return data
+                
+                if i < intentos - 1:
+                    await asyncio.sleep(intervalo)
+                    
+            except KuentaAPIError as e:
+                logger.error(f"Error consultando estado (Intento {i+1}): {e}")
+                # Si falla la API, podemos decidir si parar o seguir
+                if i == intentos - 1:
+                    raise HTTPException(status_code=502, detail="Error consultando estado en Kuenta")
 
-        if not creditid or not installmentid or not orderid:
-            raise HTTPException(
-                status_code=400,
-                detail="Faltan parametros obligatorios: creditid, installmentid, orderid",
-            )
+        return {"mensaje": "No se obtuvo estado final tras intentos", "status": "pending"}
 
-        url = f"https://api.kuenta.co/v1/payable/{creditid}/installment/0/order/list/{orderid}"
-        intentos = 3
-        intervalo_segundos = 10
-        intento = 0
-
-        async with httpx.AsyncClient() as client:
-            access_token = await obtener_token(client)
-            logger.info(f"Token obtenido: {access_token}")
-
-            if not access_token:
-                raise HTTPException(status_code=401, detail="No se pudo obtener el token de acceso")
-
-            headers = {
-                "Config-Organization-ID": ORG_ID,
-                "Organization-ID": debtor_id,
-                "Authorization": access_token,
-            }
-
-            while intento < intentos:
-                intento += 1
-                try:
-                    response = await client.get(url, headers=headers)
-                    response.raise_for_status()
-                    data = response.json()
-                    status = data.get("status")
-                    logger.info(f"Intento {intento}: status del pago = {status}")
-
-                    if status != "pending":
-                        logger.info(f"Estado final obtenido: {status} en el intento {intento}")
-                        return data
-
-                except Exception as e:
-                    logger.error(f"Error en intento {intento}: {str(e)}")
-                    await error_notify(
-                        method_name, debtor_id_notify_error, f"Error en intento: {intento} {str(e)}"
-                    )
-
-                if intento < intentos:
-                    await asyncio.sleep(intervalo_segundos)
-
-        return {"mensaje": "No se obtuvo un estado diferente a 'pending' tras 3 intentos"}
-
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Error en el proceso: {str(e)}")
-        await error_notify(method_name, debtor_id_notify_error, f"Error en el proceso: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error en el proceso: {str(e)}")
+        logger.error(f"Error general en obtener_estado: {e}")
+        await error_notify(method_name, debtor_id, str(e))
+        raise HTTPException(status_code=500, detail="Error procesando la solicitud")
