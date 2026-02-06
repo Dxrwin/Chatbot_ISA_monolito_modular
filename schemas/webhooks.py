@@ -1,53 +1,35 @@
 """
-Schemas de Webhooks
-Define los modelos de validación para webhooks y requests relacionados.
+Esquemas para los payloads de Webhooks (Agentes de voz/IA).
 """
-from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Optional, Any
-
-
-# ============================================
-# Modelos de WebhookPayload (de models.models)
-# ============================================
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 class InputVariables(BaseModel):
-    """
-    Define la estructura y tipos de las variables de entrada del webhook.
-    """
+    """Variables de entrada recibidas del proveedor de voz."""
     NOMBRE_TITULAR: Optional[str] = None
     Nombre: Optional[str] = None
     CORREO: Optional[str] = None
     Contacto: Optional[str] = None
-    Celular: Optional[str] = None  # Telefono libre usado por el flujo de renovaciones
+    Celular: Optional[str] = None 
     Universidad: Optional[str] = None
     EMAIL: Optional[str] = None
-    PHONE_NUMBER: Optional[str] = Field(None, alias="PHONE_NUMBER")  # Mapea el alias
+    PHONE_NUMBER: Optional[str] = Field(None, alias="PHONE_NUMBER")
     SEMESTRE: Optional[int] = None
     LINEA_CREDITO: Optional[str] = None
     ESTADO_CREDITO: Optional[str] = None
     CUOTAS_PENDIENTES: Optional[int] = None
 
-    # Permite campos adicionales y acepta alias/camelCase
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     @field_validator("Contacto", "Celular", "PHONE_NUMBER", mode="before")
     @classmethod
     def _cast_phone_like_to_str(cls, v: Any) -> Optional[str]:
-        """
-        Convierte enteros u otros tipos sencillos a str para evitar 422 cuando llegan numeros.
-        """
-        if v is None:
-            return None
-        try:
-            return str(v)
-        except Exception:
-            return v
-
+        """Convierte números a string para evitar errores de validación."""
+        if v is None: return None
+        return str(v)
 
 class ExtractedVariables(BaseModel):
-    """
-    Define la estructura y tipos de las variables extraidas del webhook.
-    """
+    """Variables extraídas durante la conversación por la IA."""
     resumen: Optional[str] = None
     comentario_libre: Optional[str] = Field(None, alias="comentarioLibre")
     contesto_llamada: Optional[bool] = Field(None, alias="contestoLlamada")
@@ -56,7 +38,7 @@ class ExtractedVariables(BaseModel):
     correo_cliente: Optional[str] = Field(None, alias="correoCliente")
     primer_name: Optional[str] = Field(None, alias="primerName")
     desicion_correo: Optional[bool] = Field(None, alias="desicionCorreo")
-    ambiguedad: Optional[bool] = Field(None, alias="ambigüedad")
+    ambiguedad: Optional[bool] = Field(None, alias="ambigüedad") # Ojo con el caracter especial
     interes_correo: Optional[str] = Field(None, alias="interesCorreo")
     estado: Optional[bool] = None
     acpt_info_email: Optional[bool] = Field(None, alias="acptInfoEmail")
@@ -72,23 +54,27 @@ class ExtractedVariables(BaseModel):
     fecha_asst_assor: Optional[str] = Field(None, alias="fechaAsstAssor")
     interessolicitud: Optional[str] = Field(None, alias="interesSolicitud")
     intrsrenovarbool: Optional[bool] = Field(None, alias="intrsRenovarBool")
-    
-    # Campos adicionales de logica.py
-    link_enviado_sms: Optional[str] = None
 
-    # Permite campos adicionales y acepta alias/camelCase
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-
 class WebhookPayload(BaseModel):
-    """
-    Define la estructura principal del payload que llega al webhook.
-    """
+    """Payload principal del webhook."""
     input_variables: InputVariables = Field(default_factory=InputVariables, alias="inputVariables")
     extracted_variables: ExtractedVariables = Field(default_factory=ExtractedVariables, alias="extractedVariables")
 
-    # Permite cualquier otro campo en el nivel superior del payload y alias/camelCase
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_extracted_variables(cls, data: Any) -> Any:
+        """Normaliza extracted_variables si viene vacío o nulo."""
+        if isinstance(data, dict):
+            extracted = data.get("extractedVariables") or data.get("extracted_variables")
+            if isinstance(extracted, list) or extracted is None:
+                data["extracted_variables"] = {}
+                if "extractedVariables" in data:
+                    data["extractedVariables"] = {}
+        return data
 
 
 # ============================================
@@ -134,3 +120,85 @@ class TestNotifyRequest(BaseModel):
     method_name: str = "test_method"
     client_id: str = "test_client"
     message: str = "Mensaje de prueba para notificación"
+
+
+# ============================================
+# Modelos para el Flujo de Renovaciones Vinculadas
+# ============================================
+
+class CreditoData(BaseModel):
+    """
+    Modelo anidado que contiene los datos financieros del crédito.
+    Este modelo se inserta en la tabla 'credito' (padre).
+    """
+    referencia_simulacion: Optional[str] = None
+    nombre_linea_simulacion: Optional[str] = None
+    cuota_inicial_simulacion: Optional[float] = None
+    semestre_renovacion: Optional[str] = None
+    estado_credito_post_confirmado: int = Field(
+        ..., 
+        description="Estado numérico del crédito (0-20). Se validará y mapeará a texto automáticamente."
+    )
+    valor_solicitud_express: Optional[float] = None
+
+    @field_validator("estado_credito_post_confirmado")
+    @classmethod
+    def validar_estado_es_entero(cls, v: Any) -> int:
+        """
+        Valida que el estado sea estrictamente un entero.
+        """
+        if not isinstance(v, int):
+            raise ValueError(
+                f"estado_credito_post_confirmado debe ser un entero, recibido: {type(v).__name__}"
+            )
+        return v
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class RenovacionClienteRequest(BaseModel):
+    """
+    Modelo principal para registrar una renovación de crédito con relación padre-hijo.
+    Contiene los datos del cliente (tabla hija) y el objeto CreditoData (tabla padre).
+    """
+    # PK de la tabla credito - se usará como FK en renovaciones_clientes
+    ID_Credito_simulacion: str = Field(
+        ..., 
+        min_length=1,
+        description="Identificador único del crédito (PK en tabla credito, FK en renovaciones_clientes)"
+    )
+    
+    # Datos del cliente (tabla renovaciones_clientes)
+    numero_telefono: str = Field(..., min_length=7, max_length=20)
+    correo_cliente: str = Field(..., min_length=3)
+    nombre_cliente: str = Field(..., min_length=1, max_length=150)
+    
+    # Datos del crédito (tabla credito) - objeto anidado
+    credito_data: CreditoData = Field(
+        ...,
+        description="Datos financieros del crédito que se insertarán en la tabla padre"
+    )
+
+    @field_validator("correo_cliente")
+    @classmethod
+    def validar_formato_email(cls, v: str) -> str:
+        """
+        Validación básica de formato de email.
+        """
+        if "@" not in v or "." not in v.split("@")[-1]:
+            raise ValueError("El correo_cliente debe tener un formato válido")
+        return v.strip().lower()
+
+    @field_validator("numero_telefono")
+    @classmethod
+    def validar_formato_telefono(cls, v: str) -> str:
+        """
+        Limpia y valida el formato del teléfono.
+        """
+        # Remover espacios y caracteres comunes
+        cleaned = v.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+        if not cleaned.isdigit():
+            raise ValueError("El numero_telefono debe contener solo dígitos")
+        return cleaned
+
+    model_config = ConfigDict(extra="forbid")

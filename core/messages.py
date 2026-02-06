@@ -1,12 +1,13 @@
 # Mensajes amigables para el cliente
 
 MENSAJES_CLIENTE = {
+    "error_encontrar_linea": "Lo sentimos, el producto financiero seleccionado no está disponible en este momento. Por favor intenta nuevamente más tarde.",
     "error_conexion": "Lo sentimos, en este momento no podemos procesar tu solicitud. Por favor intenta nuevamente en unos minutos.",
-    "error_datos": "Los valores ingresados no son vÃƒÂ¡lidos. Por favor verifica que el monto y la cuota inicial sean nÃƒÂºmeros vÃƒÂ¡lidos.",
-    "error_servicio": "En este momento nuestro servicio no estÃƒÂ¡ disponible. Por favor intenta mÃƒÂ¡s tarde.",
-    "error_simulacion": "No pudimos completar la simulaciÃƒÂ³n de tu crÃƒÂ©dito. Por favor verifica los datos e intenta nuevamente.",
-    "cuotas_no_encontradas": "No se pudo obtener el detalle de las cuotas para tu crÃƒÂ©dito. Por favor intenta nuevamente.",
-    "error_general": "Hubo un problema al procesar tu solicitud. Por favor intenta nuevamente mÃƒÂ¡s tarde."
+    "error_datos": "Los valores ingresados no son validos. Por favor verifica que el monto y la cuota inicial sean numeros validos.",
+    "error_servicio": "En este momento nuestro servicio no esta disponible. Por favor intenta mas tarde.",
+    "error_simulacion": "No pudimos completar la simulacion de tu credito. Por favor verifica los datos e intenta nuevamente.",
+    "cuotas_no_encontradas": "No se pudo obtener el detalle de las cuotas para tu credito. Por favor intenta nuevamente.",
+    "error_general": "Hubo un problema al procesar tu solicitud. Por favor intenta nuevamente mas tarde."
 }
 
 MENSAJES_USUARIO = {
