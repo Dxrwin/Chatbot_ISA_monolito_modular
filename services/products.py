@@ -37,12 +37,14 @@ async def obtener_product_line(
     target_slug = slugify_nombre(name) if name else ""
     
     try:
+        logger.info(f"[KUENTA_LINES_LIST] Solicitando líneas para parent_id: {parent_id}")
         token = await obtener_token()
         
         # invocamos al cliente que realizara la peticion a la api
         lines_data = await kuenta.get_product_lines(token, settings.ORG_ID, parent_id)
         
         lines = lines_data.get("lines", []) if isinstance(lines_data, dict) else []
+        logger.info(f"[KUENTA_LINES_LIST] Líneas obtenidas: {lines}")
         if not lines and isinstance(lines_data, list): lines = lines_data # Manejo si la API devuelve lista directa
 
         candidates = []

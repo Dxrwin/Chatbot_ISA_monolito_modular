@@ -2,10 +2,11 @@ import json
 import logging
 import traceback
 import re
+import asyncio
+from fastapi.responses import JSONResponse
 import httpx
 from typing import Optional, Any, Dict
-
-
+from utils.notify_error import info_notify
 from db.logs_repo import insertar_log
 from db.servicios_repo import obtener_servicio_externo_por_codigo
 
@@ -66,7 +67,7 @@ class ExternalClient:
         instance.client_id = client_id
         return instance
 
-    # ===== MÉTODOS QUE FALTABAN Y CAUSABAN EL ERROR =====
+    
     def set_url(self, url: str) -> None:
         """Establece la URL (puede contener placeholders)"""
         self.url = url
@@ -85,7 +86,6 @@ class ExternalClient:
     def set_body(self, body: Dict[str, Any]) -> None:
         """Establece el body (puede contener placeholders)"""
         self.body = body or {}
-    # ====================================================
 
     def set_dynamic_values(self, values: Dict[str, Any]) -> None:
         """Establece variables dinámicas para reemplazos."""
@@ -127,49 +127,161 @@ class ExternalClient:
     async def run(self) -> Dict[str, Any]:
         """Ejecuta la petición HTTP al servicio externo."""
         try:
-            # Reemplazar variables en URL
+            # ========== PASO 1: REEMPLAZO DE VARIABLES DINÁMICAS ==========
+            # Reemplaza placeholders {variable} en URL, headers y body con valores reales
+            # Ejemplo: "{access_token}" se convierte en "Bearer eyJ..."
             final_url = self._replace_variables(self.url)
-
-            # Reemplazar variables en headers
             final_headers = self._process_dict(self.header)
-
-            # Reemplazar variables en body
             final_body = self._process_dict(self.body) if self.body else {}
 
-            logger.info(f"[{self.codigo}] URL final: {final_url}")
+            # ========== LOGS DETALLADOS ANTES DE LA PETICIÓN ==========
+            logger.info(f"\n{'='*80}")
+            logger.info(f"[{self.codigo}] INICIANDO PETICIÓN HTTP")
+            logger.info(f"{'='*80}")
+            logger.info(f"URL:     {final_url} \n")
+            logger.info(f"Método:  {self.metodo} \n")
+            logger.info(f"Reintentos: {self.reintentos} \n")
+            logger.info(f"Headers: {json.dumps(final_headers, indent=2, ensure_ascii=False)}\n")
+            logger.info(f"Body:    {json.dumps(final_body, indent=2, ensure_ascii=False) if final_body else 'No body'} \n")
+            logger.info(f"{'='*80}\n")
 
+            try:
+                from utils.notify_error import info_notify
+                await info_notify(
+                    method_name=f"external_client:{self.codigo}",
+                    client_id=self.client_id or "N/A",
+                    info_message=f"Ejecutando {self.metodo} a '{self.nombre_servicio}' | URL: {final_url}"
+                )
+            except Exception as notify_err:
+                logger.debug(f"No se pudo enviar notificación previa: {notify_err}")
+
+            # ========== PASO 2: EJECUCIÓN DE LA PETICIÓN HTTP ==========
             async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+                # Sistema de reintentos configurable desde BD
                 for attempt in range(self.reintentos + 1):
                     try:
+                        # --- Gestión de Métodos HTTP ---
+                        # Preparamos los argumentos según el tipo de método HTTP
                         kwargs = {"headers": final_headers}
+
+                        logger.info(f"[{self.codigo}] Método: {self.metodo}")
+                        logger.info(f"[{self.codigo}] Headers: {final_headers}")
+                        
+                        
+                        # POST, PUT, PATCH: Envían datos en el BODY como JSON
+                        # - Se usa 'json' para que httpx serialice automáticamente
+                        # - Content-Type: application/json se agrega automáticamente
                         if self.metodo in ["POST", "PUT", "PATCH"]:
                             kwargs["json"] = final_body
+                            logger.debug(f"[{self.codigo}] Método {self.metodo}: enviando data en BODY como JSON")
+                        
+                        # GET: Envía parámetros en la QUERY STRING (URL)
+                        # - Se usa 'params' para construir ?param1=value1&param2=value2
+                        # - No se envía body
                         elif self.metodo == "GET":
                             kwargs["params"] = final_body
-
-                        response = await client.request(self.metodo, final_url, **kwargs)
+                            logger.debug(f"[{self.codigo}] Método GET: enviando data como QUERY PARAMS")
                         
-                        if response.status_code >= 400:
+                        # DELETE: Puede o no llevar body según la API
+                        # - Algunos servicios esperan body, otros no
+                        # - Por defecto lo enviamos como JSON si existe
+                        elif self.metodo == "DELETE":
+                            if final_body:
+                                kwargs["json"] = final_body
+                                logger.debug(f"[{self.codigo}] Método DELETE: enviando data en BODY")
+                        
+                        # Ejecutar la petición HTTP usando el método genérico request()
+                        # Esto es equivalente a hacer: client.get(), client.post(), etc.
+                        response = await client.request(self.metodo, final_url, **kwargs)
+
+                        # ========== PASO 3: PROCESAMIENTO DE LA RESPUESTA ==========
+                        # Intentar parsear como JSON (la mayoría de APIs REST retornan JSON)
+                        try:
+                            data = response.json()
+                            response_data = data.get("data",{})
+                            #estatus de la respuesta
+                            status = data.get("status",{})
+                            logger.info(f"[{self.codigo}] Status: {status}" + "\n")
+
+                            
+                        except:
+                            # Si no es JSON válido, guardar como texto plano
+                            data = {"raw_text": response.text}
+                            response_data = data.get("data",{})
+                            #logger.info(f"[{self.codigo}] Respuesta: {response_data}")
+
+                        # ========== LOGS DETALLADOS DESPUÉS DE LA RESPUESTA ==========
+                        logger.info(f"[{self.codigo}] RESPUESTA RECIBIDA")
+                        # response_data = data.get("data",{})
+                        # logger.info(f"\n{'='*80}")
+                        # logger.info(f"response_data: {response_data}")
+
+
+                        # ========== PASO 4: NOTIFICACIONES Y LOGS EN BD ==========
+                        if response.status_code == 200 or response.status_code == 201:
+                            # Respuesta exitosa (2xx, 3xx)
+                            try:
+                                await info_notify(
+                                    method_name=f"external_client:{self.codigo}",
+                                    client_id=self.client_id or "N/A",
+                                    info_message=f"|Respuesta exitosa de '{self.nombre_servicio}' | Status: {response.status_code}"
+                                )
+                                # Retornar resultado exitoso
+                                return {"status": response.status_code, "data": response_data}
+                            except Exception as notify_err:
+                                logger.debug(f"No se pudo enviar notificación de éxito: {notify_err}")
+                        else:
+                            # Respuesta con error (4xx, 5xx)
+                            logger.error(f"[{self.codigo}] Error HTTP {response.status_code}: {response.text}")
                             await self._log_error(
                                 status=response.status_code,
                                 error_message=f"Respuesta no exitosa: {response.status_code}",
                                 response_text=response.text,
                             )
+
+
+                    except httpx.TimeoutException as timeout_err:
+                        # Error de timeout específico
+                        logger.error(f"[{self.codigo}]  TIMEOUT en intento {attempt + 1}/{self.reintentos + 1}: {timeout_err}")
+                        if attempt == self.reintentos:
+                            await self._log_error(504, "Gateway Timeout", str(timeout_err))
+
+                            return JSONResponse(status_code=504, content={"status": 504, "data": {"error": "Timeout al conectar con el servicio externo"}})
                         
-                        try:
-                            data = response.json()
-                        except:
-                            data = {"raw_text": response.text}
-
-                        return {"status": response.status_code, "data": data}
-
+                        if attempt < self.reintentos:
+                            logger.warning(f"[{self.codigo}] Reintentando en 1 segundo...")
+                            await asyncio.sleep(1)
+                    
+                    except httpx.RequestError as req_err:
+                        # Errores de conexión, DNS, etc.
+                        logger.error(f"[{self.codigo}] 🔌 ERROR DE CONEXIÓN en intento {attempt + 1}/{self.reintentos + 1}: {req_err}")
+                        if attempt == self.reintentos:
+                            await self._log_error(503, "Service Unavailable", str(req_err))
+                            return {"status": 503, "data": {"error": "No se pudo conectar con el servicio externo"}}
+                        
+                        if attempt < self.reintentos:
+                            logger.warning(f"[{self.codigo}] Reintentando en 1 segundo...")
+                            await asyncio.sleep(1)
+                    
                     except Exception as e:
-                        # Log solo si es el último intento o error crítico
+                        # Cualquier otro error inesperado
+                        logger.error(f"[{self.codigo}]  ERROR INESPERADO en intento {attempt + 1}/{self.reintentos + 1}: {str(e)}")
                         if attempt == self.reintentos:
                             await self._log_error(500, str(e), traceback.format_exc())
                             return {"status": 500, "data": {"error": str(e)}}
+                        
+                        if attempt < self.reintentos:
+                            logger.warning(f"[{self.codigo}] Reintentando en 1 segundo...")
+                            await asyncio.sleep(1)
 
         except Exception as e:
+            # Error crítico fuera del loop de reintentos
+            logger.error(f"\n{'='*80}")
+            logger.error(f"[{self.codigo}] ERROR CRÍTICO")
+            logger.error(f"{'='*80}")
+            logger.error(f"Mensaje: {str(e)}")
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            logger.error(f"{'='*80}\n")
             await self._log_error(500, str(e), traceback.format_exc())
             return {"status": 500, "data": {"error": f"Error interno: {str(e)}"}}
 

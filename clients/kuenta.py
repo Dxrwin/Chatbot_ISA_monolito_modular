@@ -29,6 +29,7 @@ async def get_product_lines(access_token: str, org_id: str, client_id: Optional[
         # Inyectar variables dinámicas (URL, Headers)
         client.set_dynamic_values({
             "ORG_ID": org_id,
+            "Config-Organization-ID": org_id,
             "access_token": access_token
         })
         
@@ -37,15 +38,23 @@ async def get_product_lines(access_token: str, org_id: str, client_id: Optional[
             client.set_url(f"{settings.API_URL}")
 
         response = await client.run()
+
+        #logger.info(f"[KUENTA_LINES_LIST] Respuesta: {response}")
         
-        if response["status"] >= 400:
+        if response["status"] == 400:
+            raise KuentaAPIError("Error obteniendo líneas", response["status"], response["data"])
+        elif response["status"] == 404:
+            raise KuentaAPIError("Error obteniendo líneas", response["status"], response["data"])
+        elif response["status"] == 500:
+            raise KuentaAPIError("Error obteniendo líneas", response["status"], response["data"])
+        elif response["status"] == 502:
             raise KuentaAPIError("Error obteniendo líneas", response["status"], response["data"])
             
         return response["data"]
-        
     except ValueError:
         # Fallback si el servicio no está en BD (Opcional, para compatibilidad)
         raise KuentaAPIError("Servicio KUENTA_LINES_LIST no configurado", 500)
+
 
 async def get_product_detail(access_token: str, org_id: str, product_id: str) -> Dict[str, Any]:
     """
@@ -177,5 +186,28 @@ async def approve_totp(access_token: str, org_id: str, id_debtor: str, id_asista
         "codigo_totp": codigo
     })
     
+    response = await client.run()
+    return response
+
+
+async def get_receivables(access_token: str, org_id: str, credit_id: str) -> Dict[str, Any]:
+    """
+    Obtiene estado de cuenta/mora (Receivables).
+    Código servicio: KUENTA_RECEIVABLE_GET
+    """
+    # Carga configuración dinámica
+    client = await ExternalClient.from_code("KUENTA_RECEIVABLE_GET", client_id=credit_id)
+    
+    # Inyección de variables
+    client.set_dynamic_values({
+        "ORG_ID": org_id,
+        "access_token": access_token,
+        "id_credito": credit_id
+    })
+    
+    # Ajuste de URL si la base es genérica y falta el ID
+    if "{id_credito}" not in client.url:
+        client.set_path(f"/{credit_id}")
+
     response = await client.run()
     return response
